@@ -1,4 +1,5 @@
 """Local LLM backend — OpenAI or Gemini, selected by LLM_PROVIDER."""
+
 from ..config import (
     GEMINI_MODEL,
     LLM_PROVIDER,
@@ -30,24 +31,33 @@ def call_openai_llm(prompt: str) -> str:
 def call_gemini_llm(prompt: str) -> str:
     """Gemini backend used by --mode local when LLM_PROVIDER=gemini."""
     try:
-        from google import genai  # type: ignore
+        from google import genai
+        from google.genai import types
     except ImportError as e:
         raise RuntimeError(
-            "google-genai is required for LLM_PROVIDER=gemini. Install it with:\n"
-            "    pip install -r requirements-local.txt"
+            "google-genai is required for LLM_PROVIDER=gemini. "
+            "Install it with:\n"
+            "    uv pip install google-genai"
         ) from e
 
     client = genai.Client(api_key=require_gemini_key())
+
     response = client.models.generate_content(
         model=GEMINI_MODEL,
         contents=prompt,
-        config={
-            "temperature": 0.2,
-            "response_mime_type": "application/json",
-            "max_output_tokens": 8192,
-        },
+        config=types.GenerateContentConfig(
+            temperature=0.2,
+            response_mime_type="application/json",
+            max_output_tokens=8192,
+        ),
     )
-    return response.text or ""
+
+    text = response.text
+
+    if not text:
+        raise RuntimeError("Gemini returned an empty response.")
+
+    return text
 
 
 def call_local_llm(prompt: str) -> str:
@@ -57,6 +67,4 @@ def call_local_llm(prompt: str) -> str:
         return call_openai_llm(prompt)
     if provider == "gemini":
         return call_gemini_llm(prompt)
-    raise RuntimeError(
-        f"Unknown LLM_PROVIDER={provider!r}. Use 'openai' or 'gemini'."
-    )
+    raise RuntimeError(f"Unknown LLM_PROVIDER={provider!r}. Use 'openai' or 'gemini'.")

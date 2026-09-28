@@ -10,6 +10,7 @@ The LLM call is pluggable via the `llm_fn` argument so the same prompts can
 drive either MuAPI (default, --mode api) or a direct local LLM client
 (--mode local).
 """
+
 import json
 import re
 from typing import Callable, Dict, List, Optional
@@ -61,10 +62,12 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 {{"highlights":[{{"title":"string","start_time":float,"end_time":float,"score":int,"hook_sentence":"string","virality_reason":"string"}}]}}"""
 
 
-CHUNK_SIZE_SECONDS = 1200       # 20-min chunks for long videos
-LONG_VIDEO_THRESHOLD = 1800     # chunk videos longer than 30 min
+CHUNK_SIZE_SECONDS = 1200  # 20-min chunks for long videos
+LONG_VIDEO_THRESHOLD = 1800  # chunk videos longer than 30 min
 CHUNK_OVERLAP_SECONDS = 60
-GPT_CALL_TIMEOUT_SECONDS = 300  # cap LLM polls at 5 min — a wedged call should fail fast
+GPT_CALL_TIMEOUT_SECONDS = (
+    300  # cap LLM polls at 5 min — a wedged call should fail fast
+)
 MAX_HIGHLIGHT_API_ATTEMPTS = 3
 
 
@@ -78,7 +81,12 @@ def call_muapi_llm(prompt: str) -> str:
     )
 
     outputs = result.get("outputs")
-    if isinstance(outputs, list) and outputs and isinstance(outputs[0], str) and outputs[0].strip():
+    if (
+        isinstance(outputs, list)
+        and outputs
+        and isinstance(outputs[0], str)
+        and outputs[0].strip()
+    ):
         return outputs[0]
 
     for key in ("output", "text", "response", "result", "content"):
@@ -106,7 +114,7 @@ def _parse_json_loose(raw: str) -> Dict:
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1:
-            return json.loads(text[start:end + 1])
+            return json.loads(text[start : end + 1])
         raise
 
 
@@ -160,7 +168,9 @@ def _sanitize_highlights(raw_highlights: object, duration: float) -> List[Dict]:
     return cleaned
 
 
-def detect_content_type(transcript: Dict, llm_fn: LLMFn = call_muapi_llm) -> Dict[str, str]:
+def detect_content_type(
+    transcript: Dict, llm_fn: LLMFn = call_muapi_llm
+) -> Dict[str, str]:
     segments = transcript.get("segments", [])
     sample = " ".join(s["text"] for s in segments[:25])[:3000]
     prompt = f"{CONTENT_TYPE_PROMPT}\n\nTranscript sample:\n{sample}"
@@ -184,7 +194,8 @@ def chunk_transcript(transcript: Dict) -> List[Dict]:
     while start < duration:
         end = min(start + CHUNK_SIZE_SECONDS, duration)
         chunk_segs = [
-            s for s in segments
+            s
+            for s in segments
             if s["start"] >= start and s["end"] <= end + CHUNK_OVERLAP_SECONDS
         ]
         if chunk_segs:
@@ -221,26 +232,36 @@ def call_highlight_api(
     last_error = "unknown"
 
     for attempt in range(1, MAX_HIGHLIGHT_API_ATTEMPTS + 1):
-        raw = llm_fn(prompt)
         try:
+            print(f"[highlights] prompt size: {len(prompt):,} characters")
+
+            raw = llm_fn(prompt)
+
             parsed = _parse_json_loose(raw)
-            highlights = _sanitize_highlights(parsed.get("highlights"), duration=duration)
+            highlights = _sanitize_highlights(parsed, duration)
+
             if highlights:
                 return {"highlights": highlights}
+
             last_error = "no valid highlights in response"
+
         except Exception as e:
             last_error = str(e)
+            print(
+                f"[highlights] attempt {attempt}/{MAX_HIGHLIGHT_API_ATTEMPTS} "
+                f"failed: {e}"
+            )
 
         if attempt < MAX_HIGHLIGHT_API_ATTEMPTS:
-            print(
-                f"[highlights] invalid model output on attempt {attempt}/{MAX_HIGHLIGHT_API_ATTEMPTS}; retrying",
-                flush=True,
-            )
-            prompt = (
-                base_prompt
-                + "\n\nIMPORTANT: Return ONLY valid JSON with a top-level 'highlights' array."
-                + " Each item must include: title, start_time, end_time, score, hook_sentence, virality_reason."
-                + " No markdown fences, no commentary."
+            import time
+
+            delay = 5 * (2 ** (attempt - 1))
+            print(f"[highlights] retrying in {delay}s...")
+            time.sleep(delay)
+
+            prompt = base_prompt + (
+                "\n\nIMPORTANT: Return ONLY valid JSON. "
+                "Do not include markdown fences or explanatory text."
             )
 
     raise RuntimeError(
@@ -282,17 +303,32 @@ def get_highlights(
     llm_fn = llm_fn or call_muapi_llm
     duration = transcript.get("duration", 0)
     content_info = detect_content_type(transcript, llm_fn=llm_fn)
-    print(f"[highlights] content={content_info.get('content_type')} density={content_info.get('density')} duration={duration:.0f}s", flush=True)
+    print(
+        f"[highlights] content={content_info.get('content_type')} density={content_info.get('density')} duration={duration:.0f}s",
+        flush=True,
+    )
 
     if duration >= LONG_VIDEO_THRESHOLD:
         chunks = chunk_transcript(transcript)
-        print(f"[highlights] long video — splitting into {len(chunks)} chunks", flush=True)
+        print(
+            f"[highlights] long video — splitting into {len(chunks)} chunks", flush=True
+        )
         all_highlights: List[Dict] = []
         for i, chunk in enumerate(chunks):
             offset = chunk.get("_offset", 0)
             text = build_transcript_text(chunk)
-            print(f"[highlights] chunk {i + 1}/{len(chunks)} (offset {offset:.0f}s)", flush=True)
-            result = call_highlight_api(text, content_info, chunk["duration"], num_clips=num_clips, is_chunk=True, llm_fn=llm_fn)
+            print(
+                f"[highlights] chunk {i + 1}/{len(chunks)} (offset {offset:.0f}s)",
+                flush=True,
+            )
+            result = call_highlight_api(
+                text,
+                content_info,
+                chunk["duration"],
+                num_clips=num_clips,
+                is_chunk=True,
+                llm_fn=llm_fn,
+            )
             for h in result.get("highlights", []):
                 h["start_time"] = float(h["start_time"]) + offset
                 h["end_time"] = float(h["end_time"]) + offset
@@ -300,7 +336,9 @@ def get_highlights(
         highlights = dedupe_highlights(all_highlights)
     else:
         text = build_transcript_text(transcript)
-        result = call_highlight_api(text, content_info, duration, num_clips=num_clips, llm_fn=llm_fn)
+        result = call_highlight_api(
+            text, content_info, duration, num_clips=num_clips, llm_fn=llm_fn
+        )
         highlights = dedupe_highlights(result.get("highlights", []))
 
     return {"highlights": highlights}
